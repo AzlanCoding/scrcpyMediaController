@@ -12,7 +12,7 @@ Tested on Ubnutu Mantic 23.10 running Hyprland with `swaync`.
 Clone this repo, install Python3.12 and create a virtual environment
 ```bash
 git clone https://github.com/AzlanCoding/scrcpyMediaController
-sudo apt install python3.12 python3.12-venv python3.12-dev libgirepository1.0-dev
+sudo apt install python3.12 python3.12-venv python3.12-dev libgirepository1.0-dev libcairo2-dev
 cd scrcpyMediaController
 python3.12 -m venv virtualEnv
 source ./virtualEnv/bin/activate
@@ -21,7 +21,7 @@ exit
 ```
 Once done can remove build packages:
 ```bash
-sudo apt remove python3.12-dev libgirepository1.0-dev
+sudo apt remove python3.12-dev libgirepository1.0-dev libcairo2-dev
 sudo apt autoremove
 ```
 
@@ -48,7 +48,7 @@ nohup ./start_scrcpyMediaController.sh 0 &
 **DO NOT RUN `./start_scrcpyMediaController.sh & disown`.** Process will hang when `print()` or any standard output is called in the program.
 
 ### Killing
-use `Btop++` or something to send signal 15 (SIGTERM) and kill the process with the program named `python`. [Don't use SIGKILL!!!](https://turnoff.us/geek/dont-sigkill/?ref=linuxhandbook.com)
+use `Btop++` or something to send signal 15 (SIGTERM) and terminate the process with the program named `python`. [Don't use SIGKILL!!!](https://turnoff.us/geek/dont-sigkill/?ref=linuxhandbook.com)
 
 
 ## Customizing
@@ -61,3 +61,8 @@ updateFreq = 1
 `artUrl` holds the location of the album art icon (player icon).<br>
 `playerName` defines the name of the player.<br>
 `updateFreq` specifies how frequent the player checks for updates in seconds.
+
+## To Do
+- Convert the variables above to flags you can pass
+- Windows support using `winrt.windows.media.control.GlobalSystemMediaTransportControlsSessionManager` as suggested by Bing Chat
+- First Release

@@ -61,34 +61,39 @@ Connect your device via `adb`, then run:
 ./start_scrcpyMediaController.sh
 ```
 
-Or call `uv run` directly:
+This starts **both** `scrcpy --no-window --no-video` and the MPRIS media controller together. Output from each process is prefixed so you can tell them apart:
 
-```bash
-uv run python main.py
 ```
+[scrcpy]   INFO: scrcpy 2.x
+[scrcpy]   INFO: Connected to device
+[mediactl] next
+[mediactl] quitting...
+```
+
+Killing the script (Ctrl-C or SIGTERM) stops both processes cleanly.
 
 ### CLI options
 
+Options are forwarded to the media controller:
+
 ```
-Usage: main.py [OPTIONS]
-
-  scrcpy MPRIS media controller.
-
-  Exposes Android media playback over MPRIS so desktop notification panels
-  (swaync, dunst, waybar, etc.) can display and control it. Requires an
-  ADB-connected Android device.
-
 Options:
-  --art-url TEXT        URI to the album art / player icon.  [default: file:///path/to/icon.png]
-  --player-name TEXT    MPRIS player name exposed on D-Bus.  [default: scrcpy]
-  --update-freq FLOAT   How often (in seconds) to poll ADB for media state.  [default: 1.0]
-  --help                Show this message and exit.
+  --art-url TEXT       URI to the album art / player icon.  [default: file://<repo>/icon.png]
+  --player-name TEXT   MPRIS player name exposed on D-Bus.  [default: scrcpy]
+  --update-freq FLOAT  How often (in seconds) to poll ADB for media state.  [default: 1.0]
+  --help               Show this message and exit.
 ```
 
-Example with custom options:
+Example:
 
 ```bash
-uv run python main.py --player-name myphone --update-freq 2
+./start_scrcpyMediaController.sh --player-name myphone --update-freq 2
+```
+
+To run only the media controller without starting scrcpy:
+
+```bash
+uv run python main.py [OPTIONS]
 ```
 
 
@@ -98,17 +103,17 @@ uv run python main.py --player-name myphone --update-freq 2
 nohup ./start_scrcpyMediaController.sh &
 ```
 
-**Do not use `./start_scrcpyMediaController.sh & disown`.** The process will hang when `print()` or any standard output is called.
+Output from both processes is consumed by the prefixing pipe, so there is no hang-on-print issue.
 
-### Stopping the background process
+### Stopping
 
-Send SIGTERM (signal 15) to the `python` process — for example via `btop`, `htop`, or:
+Send SIGTERM to the script process — it will kill both children cleanly:
 
 ```bash
-pkill -f "python main.py"
+pkill -f start_scrcpyMediaController.sh
 ```
 
-[Don't use SIGKILL.](https://turnoff.us/geek/dont-sigkill/)
+Or use `btop` / `htop` to send signal 15 (SIGTERM). [Don't use SIGKILL.](https://turnoff.us/geek/dont-sigkill/)
 
 
 ## Customizing

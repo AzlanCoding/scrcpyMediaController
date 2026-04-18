@@ -1,3 +1,12 @@
+#!/usr/bin/env python3
+"""
+scrcpy MPRIS media controller.
+
+Exposes Android media playback over MPRIS so desktop notification panels
+(swaync, dunst, waybar, …) can display and control it.
+Requires an ADB-connected Android device.
+"""
+
 import re
 import subprocess
 import tempfile
@@ -6,7 +15,6 @@ from pathlib import Path
 from threading import Thread, Event
 
 import click
-import pydbus
 from mpris_server.adapters import PlayState, PlayerAdapter
 from mpris_server.events import EventAdapter
 from mpris_server.server import Server
@@ -15,13 +23,180 @@ from player import CustomPlayer
 
 
 # ---------------------------------------------------------------------------
-# Album-art helpers
+# Album-art helpers: foreground-app detection + per-app resolvers
 # ---------------------------------------------------------------------------
 
 _TMPDIR = Path(tempfile.gettempdir())
 _ART_CACHE: dict[str, str] = {}         # art_key → file:// URI  (or "" for known miss)
 _ART_CACHE_LOCK = threading.Lock()
 _ART_IN_FLIGHT: set[str] = set()        # art_keys whose fetch is in progress
+
+# Package → app tag mapping.  Add entries here to support more apps.
+_KNOWN_PACKAGES: dict[str, str] = {
+    "io.github.muntashirakon.Music":   "auxio",
+    "io.github.zyrouge.symphony":      "auxio",   # similar Coil cache layout
+    "com.spotify.music":               "spotify",
+    "de.danoeh.antennapod":            "antennapod",
+    "de.danoeh.antennapod.debug":      "antennapod",
+}
+
+
+def _adb_shell(cmd: str, timeout: int = 5) -> str:
+    result = subprocess.run(
+        ["adb", "shell", cmd],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip())
+    return result.stdout.strip()
+
+
+def _foreground_package() -> str | None:
+    """Return the package name of the topmost foreground activity (Android 10+)."""
+    try:
+        out = _adb_shell("dumpsys activity top | grep ACTIVITY | tail -n 1")
+        m = re.search(r"ACTIVITY\s+(\S+)/", out)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    # Fallback: window manager focus info
+    try:
+        out = _adb_shell("dumpsys window | grep mCurrentFocus")
+        m = re.search(r"\{[^}]+ (\S+)/", out)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+# -- Per-app resolvers: each returns a remote path on the device, or None ----
+
+def _art_auxio(package: str) -> str | None:
+    """
+    Auxio (and Symphony) uses Coil's image_manager_disk_cache.
+    Readable via run-as on debug builds; falls back to MediaStore notification
+    approach for release builds.
+    """
+    cache_dir = f"/data/data/{package}/cache/image_manager_disk_cache"
+    try:
+        result = subprocess.run(
+            ["adb", "shell", f"run-as {package} ls -t {cache_dir}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        files = [f.strip() for f in result.stdout.strip().splitlines() if f.strip()]
+        if files:
+            return f"{cache_dir}/{files[0]}"
+    except Exception:
+        pass
+    return _mediastore_art_via_notification(package)
+
+
+def _art_spotify(package: str) -> str | None:
+    """
+    Spotify caches art as .jpg/.webp in external storage — no root needed.
+    Grab the most recently modified image file.
+    """
+    bases = [
+        f"/sdcard/Android/data/{package}/cache/",
+        f"/storage/emulated/0/Android/data/{package}/cache/",
+    ]
+    for base in bases:
+        try:
+            newest = _adb_shell(
+                f"find {base} -type f \\( -name '*.jpg' -o -name '*.webp' \\) "
+                f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -n 1 | awk '{{print $2}}'",
+                timeout=8,
+            )
+            if newest:
+                return newest
+        except Exception:
+            continue
+    return None
+
+
+def _art_antennapod(package: str) -> str | None:
+    """
+    AntennaPod uses a Glide disk cache in its private data dir.
+    Tries run-as first, then falls back to external storage images.
+    """
+    cache_dir = f"/data/data/{package}/cache/image_manager_disk_cache"
+    try:
+        result = subprocess.run(
+            [
+                "adb", "shell",
+                f"run-as {package} "
+                f"find {cache_dir} -type f -printf '%T@ %p\\n' "
+                f"| sort -rn | head -n 1 | awk '{{print $2}}'",
+            ],
+            capture_output=True, text=True, timeout=8,
+        )
+        path = result.stdout.strip()
+        if path:
+            return path
+    except Exception:
+        pass
+    try:
+        img = _adb_shell(
+            f"find /sdcard/Android/data/{package}/ -type f "
+            f"\\( -name '*.jpg' -o -name '*.png' \\) "
+            f"-printf '%T@ %p\\n' 2>/dev/null | sort -rn | head -n 1 | awk '{{print $2}}'",
+            timeout=8,
+        )
+        if img:
+            return img
+    except Exception:
+        pass
+    return None
+
+
+def _mediastore_art_via_notification(package: str) -> str | None:
+    """
+    Extract album_id from the active media notification, then resolve it
+    through MediaStore.  Works on Android 9 and below; _data is redacted
+    on Android 10+ (scoped storage).
+    """
+    try:
+        dump = _adb_shell(f"dumpsys notification | grep -A 20 '{package}'")
+        m = re.search(r"album_id[=: ]+([0-9]+)", dump)
+        if m:
+            album_id = m.group(1)
+            out = _adb_shell(
+                f"content query --uri content://media/external/audio/albumart/{album_id} "
+                f"--projection _data"
+            )
+            dm = re.search(r"_data=([^\s,]+)", out)
+            if dm:
+                return dm.group(1)
+    except Exception:
+        pass
+    return None
+
+
+_ART_RESOLVERS: dict[str, object] = {
+    "auxio":      _art_auxio,
+    "spotify":    _art_spotify,
+    "antennapod": _art_antennapod,
+}
+
+
+def _pull_remote_art(remote_path: str, dest: Path, package: str) -> bool:
+    """Copy a file from the device to *dest*. Uses run-as for private paths."""
+    if remote_path.startswith("/data/data/"):
+        result = subprocess.run(
+            ["adb", "shell", f"run-as {package} cat '{remote_path}'"],
+            capture_output=True, timeout=8,
+        )
+        if result.returncode == 0 and result.stdout:
+            dest.write_bytes(result.stdout)
+            return True
+        return False
+    result = subprocess.run(
+        ["adb", "pull", remote_path, str(dest)],
+        capture_output=True, text=True, timeout=10,
+    )
+    return result.returncode == 0
 
 
 def _art_cache_key(title: str, artist: list[str], album: str) -> str:
@@ -30,10 +205,37 @@ def _art_cache_key(title: str, artist: list[str], album: str) -> str:
 
 def _fetch_art_from_device(title: str) -> str:
     """
-    Pull album art from the device's MediaStore via ADB.
-    Returns a file:// URI on success, '' on failure (streaming track,
-    art not found, ADB error, etc.).
+    Attempt to pull album art from the device.
+    Strategy (in order):
+      1. Detect foreground app and use its dedicated resolver.
+      2. Fall back to MediaStore content provider query by title
+         (works for any local-music app on Android 9 and below).
+    Returns a file:// URI on success, '' on failure.
     """
+    # --- strategy 1: app-specific resolver ----------------------------------
+    try:
+        pkg = _foreground_package()
+        if pkg:
+            app_tag = _KNOWN_PACKAGES.get(pkg)
+            resolver = _ART_RESOLVERS.get(app_tag) if app_tag else None
+            if resolver:
+                remote = resolver(pkg)
+                if remote:
+                    ext = Path(remote).suffix or ".jpg"
+                    dest = _TMPDIR / f"scrcpy_art_{pkg}{ext}"
+                    if _pull_remote_art(remote, dest, pkg):
+                        # Basic sanity-check: at least looks like an image
+                        header = dest.read_bytes()[:4]
+                        if (
+                            header[:3] == b"\xff\xd8\xff"   # JPEG
+                            or header[:4] == b"\x89PNG"      # PNG
+                            or header[:4] == b"RIFF"         # WEBP (RIFF....)
+                        ):
+                            return f"file://{dest}"
+    except Exception:
+        pass
+
+    # --- strategy 2: MediaStore query by title ------------------------------
     try:
         safe = title.replace("'", "''")
         q = subprocess.run(
@@ -50,8 +252,8 @@ def _fetch_art_from_device(title: str) -> str:
             return ""
         album_id = m.group(1)
 
-        path = _TMPDIR / f"scrcpy_art_{album_id}.jpg"
-        if not path.exists():
+        dest = _TMPDIR / f"scrcpy_art_{album_id}.jpg"
+        if not dest.exists():
             pull = subprocess.run(
                 [
                     "adb", "exec-out", "content", "read",
@@ -59,12 +261,11 @@ def _fetch_art_from_device(title: str) -> str:
                 ],
                 capture_output=True, timeout=8,
             )
-            # Validate JPEG magic bytes (FF D8 FF); errors come back as ASCII text
             if not pull.stdout or pull.stdout[:3] != b"\xff\xd8\xff":
                 return ""
-            path.write_bytes(pull.stdout)
+            dest.write_bytes(pull.stdout)
 
-        return f"file://{path}"
+        return f"file://{dest}"
     except Exception:
         return ""
 
@@ -78,13 +279,13 @@ class AppState:
         self.title: str = "No Media"
         self.album: str = ""
         self.artist: list[str] = []
-        self.art_url: str = ""          # "" means no art; populated by background fetch
+        self.art_url: str = ""
         self.shuffle: bool = False
-        self.loop_status: str = "None"  # "None" | "Track" | "Playlist"
+        self.loop_status: str = "None"
         self.playbackState: PlayState = PlayState.PLAYING
         self.media_adapter = None
         self.oldDevice: bool = False
-        self._art_key: str = ""         # identifies which track the cached art is for
+        self._art_key: str = ""
 
     @staticmethod
     def _denull(val: str) -> str:
@@ -101,13 +302,13 @@ class AppState:
             desc = media_session.split("description=")[1].split("\n")[0]
             assert desc != "null"
             desc_list = desc.split(", ")
-            assert desc_list != ["null", "null", "null"]  # media is buffering
+            assert desc_list != ["null", "null", "null"]
 
             self.title  = self._denull(desc_list[0]) or "Unknown"
             self.artist = [a for a in desc_list[1:-1] if a and a != "null"]
             self.album  = self._denull(desc_list[-1])
 
-            # -- playback state ------------------------------------------
+            # -- playback state -------------------------------------------
             pb     = media_session.split("state=PlaybackState {")[1].split("}")[0].split(", ")
             status = pb[0]
 
@@ -136,10 +337,9 @@ class AppState:
                 else:
                     print(f"[mediactl] unknown playback status: {pb}")
 
-            # -- shuffle / repeat (best-effort; not all apps expose these) ----
+            # -- shuffle / repeat -----------------------------------------
             sm = re.search(r"shuffle[_ ]mode\s*[=:]\s*(\d+)", media_session, re.I)
             if sm:
-                # 0=invalid  1=none  2=all  3=group  → active when ≥ 2
                 self.shuffle = int(sm.group(1)) >= 2
 
             rm = re.search(r"repeat[_ ]mode\s*[=:]\s*(\d+)", media_session, re.I)
@@ -147,7 +347,7 @@ class AppState:
                 r = int(rm.group(1))
                 self.loop_status = "Track" if r == 2 else ("Playlist" if r >= 3 else "None")
 
-            # -- album art (background fetch, cached by album_id) -------------
+            # -- album art (background fetch, cached by track identity) ----
             key = _art_cache_key(self.title, self.artist, self.album)
             if key != self._art_key:
                 self._art_key = key
@@ -157,14 +357,17 @@ class AppState:
                         self.art_url = _ART_CACHE[key]
                     elif key not in _ART_IN_FLIGHT:
                         _ART_IN_FLIGHT.add(key)
-                        Thread(target=self._art_worker, args=(key, self.title),
-                               daemon=True).start()
+                        Thread(
+                            target=self._art_worker,
+                            args=(key, self.title),
+                            daemon=True,
+                        ).start()
 
         except (IndexError, AssertionError):
-            self.title        = "No Media"
-            self.artist       = []
-            self.album        = ""
-            self.art_url      = ""
+            self.title         = "No Media"
+            self.artist        = []
+            self.album         = ""
+            self.art_url       = ""
             self.playbackState = PlayState.PLAYING
 
         if self.media_adapter and emit:
@@ -178,7 +381,7 @@ class AppState:
         with _ART_CACHE_LOCK:
             _ART_CACHE[key] = uri
             _ART_IN_FLIGHT.discard(key)
-        if uri and self._art_key == key:    # still the same track
+        if uri and self._art_key == key:
             self.art_url = uri
             if self.media_adapter:
                 EventAdapter.emit_changes(self.media_adapter.player, ["Metadata"])
@@ -194,112 +397,15 @@ class AppState:
 # ---------------------------------------------------------------------------
 
 class UpdateThread(Thread):
-    def __init__(
-        self,
-        app: AppState,
-        update_freq: float,
-        exit_event: Event,
-        kde_watcher: "KdeConnectWatcher | None" = None,
-    ) -> None:
+    def __init__(self, app: AppState, update_freq: float, exit_event: Event) -> None:
         super().__init__(daemon=True, name="update-thread")
         self.app         = app
         self.update_freq = update_freq
         self.exit        = exit_event
-        self.kde_watcher = kde_watcher
 
     def run(self) -> None:
         while not self.exit.wait(self.update_freq):
-            # When KDE Connect is active we keep polling ADB (so state is fresh the
-            # moment we take over) but suppress PropertiesChanged signals so MPRIS
-            # clients naturally prefer the KDE Connect entry.
-            emit = self.kde_watcher is None or not self.kde_watcher.active
-            self.app.update(emit=emit)
-
-
-# ---------------------------------------------------------------------------
-# KDE Connect watcher
-# ---------------------------------------------------------------------------
-
-class KdeConnectWatcher:
-    """
-    Polls the D-Bus session bus every `poll_interval` seconds for a KDE Connect
-    MPRIS player (org.mpris.MediaPlayer2.kdeconnect.*).
-
-    While one is found and responsive:
-      - Our PropertiesChanged signals are suppressed (UpdateThread.emit=False).
-      - Commands sent to our MPRIS entry are logged but not forwarded to ADB,
-        so the two players don't accidentally double-dispatch.
-
-    The moment KDE Connect disappears or stops responding we resume emitting
-    events and executing commands normally, without any restart required.
-
-    Disable entirely with --no-kde.
-    """
-
-    _PREFIX = "org.mpris.MediaPlayer2.kdeconnect"
-
-    def __init__(self, poll_interval: float = 10.0) -> None:
-        self.poll_interval = poll_interval
-        self._active: bool  = False
-        self._lock = threading.Lock()
-
-    @property
-    def active(self) -> bool:
-        with self._lock:
-            return self._active
-
-    def _find_name(self) -> str | None:
-        try:
-            bus     = pydbus.SessionBus()
-            dbus_obj = bus.get("org.freedesktop.DBus", "/org/freedesktop/DBus")
-            for name in dbus_obj.ListNames():
-                if name.startswith(self._PREFIX):
-                    return name
-        except Exception:
-            pass
-        return None
-
-    def _responsive(self, name: str) -> bool:
-        """
-        Try to read PlaybackStatus from the KDE Connect player.
-        Times out after 2 s — KDE Connect on flaky Wi-Fi can block indefinitely.
-        """
-        ok = [False]
-
-        def probe() -> None:
-            try:
-                bus    = pydbus.SessionBus()
-                player = bus.get(name, "/org/mpris/MediaPlayer2")
-                _      = player.PlaybackStatus
-                ok[0]  = True
-            except Exception:
-                pass
-
-        t = Thread(target=probe, daemon=True)
-        t.start()
-        t.join(2.0)
-        return ok[0]
-
-    def check(self) -> None:
-        name      = self._find_name()
-        was_active = self._active
-        active    = bool(name and self._responsive(name))
-
-        with self._lock:
-            self._active = active
-
-        if active and not was_active:
-            print(
-                f"[mediactl] KDE Connect MPRIS active ({name}), yielding — "
-                f"re-checking every {self.poll_interval:.0f} s"
-            )
-        elif not active and was_active:
-            print("[mediactl] KDE Connect MPRIS gone / unresponsive — taking over")
-
-    def run(self, exit_event: Event) -> None:
-        self.check()    # immediate check on startup
-        while not exit_event.wait(self.poll_interval):
-            self.check()
+            self.app.update()
 
 
 # ---------------------------------------------------------------------------
@@ -307,30 +413,17 @@ class KdeConnectWatcher:
 # ---------------------------------------------------------------------------
 
 class MediaAdapter(PlayerAdapter):
-    def __init__(
-        self,
-        app: AppState,
-        fallback_art: str = "",
-        kde_watcher: "KdeConnectWatcher | None" = None,
-    ) -> None:
+    def __init__(self, app: AppState, fallback_art: str = "") -> None:
         super().__init__()
         self.app          = app
         self.fallback_art = fallback_art
-        self.kde_watcher  = kde_watcher
-
-    def _kde_active(self) -> bool:
-        return self.kde_watcher is not None and self.kde_watcher.active
 
     def _cmd(self, label: str, key: str) -> None:
-        """Dispatch a media command; defer silently when KDE Connect is active."""
-        if self._kde_active():
-            print(f"[mediactl] KDE Connect active — deferring '{label}'")
-            return
         print(label)
         self.app.dispatch_media_key(key)
         self.app.update()
 
-    # -- commands -------------------------------------------------------
+    # -- commands -----------------------------------------------------------
 
     def next(self)     -> None: self._cmd("next",   "next")
     def previous(self) -> None: self._cmd("prev",   "previous")
@@ -339,16 +432,16 @@ class MediaAdapter(PlayerAdapter):
     def stop(self)     -> None: self._cmd("stop",   "stop")
     def play(self)     -> None: self._cmd("play",   "play")
 
-    # -- state ----------------------------------------------------------
+    # -- state --------------------------------------------------------------
 
-    def get_playstate(self) -> PlayState: return self.app.playbackState
-    def get_shuffle(self)   -> bool:      return self.app.shuffle
-    def get_loop_status(self) -> str:     return self.app.loop_status
+    def get_playstate(self)   -> PlayState: return self.app.playbackState
+    def get_shuffle(self)     -> bool:      return self.app.shuffle
+    def get_loop_status(self) -> str:       return self.app.loop_status
 
     def get_art_url(self, track) -> str:
         return self.app.art_url or self.fallback_art
 
-    # -- capabilities ---------------------------------------------------
+    # -- capabilities -------------------------------------------------------
 
     def can_go_next(self)     -> bool: return True
     def can_go_previous(self) -> bool: return True
@@ -362,7 +455,7 @@ class MediaAdapter(PlayerAdapter):
     def can_fullscreen(self)  -> bool: return False
     def get_fullscreen(self)  -> None: return None
 
-    # -- info -----------------------------------------------------------
+    # -- info ---------------------------------------------------------------
 
     def get_stream_title(self)  -> str:       return self.app.title
     def get_desktop_entry(self) -> str:       return "scrcpy"
@@ -406,59 +499,64 @@ class MediaAdapter(PlayerAdapter):
     default="",
     help=(
         "Fallback album art URI used when device art cannot be fetched "
-        "(e.g. for streaming tracks). Defaults to none."
+        "(e.g. for streaming tracks). Defaults to the bundled icon."
     ),
 )
 @click.option(
-    "--no-kde",
+    "--detach",
     is_flag=True,
     default=False,
-    help="Disable KDE Connect detection; always act as primary MPRIS controller.",
-)
-@click.option(
-    "--kde-interval",
-    default=10.0,
-    show_default=True,
-    type=float,
-    help="Seconds between KDE Connect responsiveness checks. Ignored with --no-kde.",
+    help="Do not start or manage scrcpy. Lets you handle the scrcpy lifecycle yourself.",
 )
 def cli(
     player_name: str,
     update_freq: float,
     art_url: str,
-    no_kde: bool,
-    kde_interval: float,
+    detach: bool,
 ) -> None:
     """scrcpy MPRIS media controller.
 
     Exposes Android media playback over MPRIS so desktop notification panels
-    (swaync, dunst, waybar, …) can display and control it.
+    (swaync, dunst, waybar, ...) can display and control it.
     Requires an ADB-connected Android device.
 
-    By default the script monitors the session bus for a KDE Connect MPRIS player.
-    While one is active it yields control (suppresses its own MPRIS events and
-    defers commands). When KDE Connect disappears or stops responding it takes
-    over automatically. Use --no-kde to always act as primary controller.
+    By default this also starts `scrcpy --no-window --no-video` and tears it
+    down on exit. Pass --detach to manage scrcpy yourself.
     """
+    # -- resolve fallback art icon ----------------------------------------
+    if not art_url:
+        icon = Path(__file__).parent / "icon.png"
+        if icon.exists():
+            art_url = f"file://{icon}"
+
+    # -- optionally launch scrcpy -----------------------------------------
+    scrcpy_proc: subprocess.Popen | None = None
+    if not detach:
+        try:
+            scrcpy_proc = subprocess.Popen(
+                ["scrcpy", "--no-window", "--no-video"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+
+            def _drain(proc: subprocess.Popen) -> None:
+                for raw in proc.stdout:
+                    print(f"[scrcpy] {raw.decode(errors='replace').rstrip()}")
+
+            Thread(target=_drain, args=(scrcpy_proc,), daemon=True).start()
+            print("[mediactl] scrcpy started")
+        except FileNotFoundError:
+            print("[mediactl] scrcpy not found in PATH — continuing without it")
+
+    # -- MPRIS setup ------------------------------------------------------
     app = AppState()
     app.update(emit=False)
 
     exit_event = Event()
-
-    kde_watcher: KdeConnectWatcher | None = None
-    if not no_kde:
-        kde_watcher = KdeConnectWatcher(poll_interval=kde_interval)
-        Thread(
-            target=kde_watcher.run,
-            args=(exit_event,),
-            daemon=True,
-            name="kde-watcher",
-        ).start()
-
-    update_thread = UpdateThread(app, update_freq, exit_event, kde_watcher)
+    update_thread = UpdateThread(app, update_freq, exit_event)
     update_thread.start()
 
-    media_adapter = MediaAdapter(app, fallback_art=art_url, kde_watcher=kde_watcher)
+    media_adapter = MediaAdapter(app, fallback_art=art_url)
     mpris         = Server(name=player_name, adapter=media_adapter)
     mpris.player  = CustomPlayer(name=player_name, adapter=media_adapter)
     mpris.interfaces = mpris.root, mpris.player
@@ -469,11 +567,17 @@ def cli(
     except KeyboardInterrupt:
         pass
     except RuntimeError:
-        print(player_name + " Media Controller already running!")
+        print(player_name + " media controller is already running!")
     finally:
         print("quitting...")
         exit_event.set()
         update_thread.join()
+        if scrcpy_proc is not None:
+            scrcpy_proc.terminate()
+            try:
+                scrcpy_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                scrcpy_proc.kill()
 
 
 if __name__ == "__main__":

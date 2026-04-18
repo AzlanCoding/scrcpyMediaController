@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-scrcpy-media-controller = "main:cli"
+audiocpy = "main:cli"
 
 [build-system]
 requires = ["hatchling"]

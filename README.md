@@ -1,68 +1,138 @@
 # scrcpyMediaController
+
 ![Screenshot of scrcpyMediaController in swaync](Screenshots/Screenshot_02-Jun_10-38-55_26599.png)
-Control your phone/emulator's media playback from your notification panel through MPRIS.<br>
-This script works independently from scrcpy and does not require it to be installed or running for use.<br>
-Take note that this "simple" script only works on GNU/Linux with MPRIS and only controls media playback. 
-It does not forward audio. Use scrcpy or sndcpy to do that.<br>
-**Credits:** Default album art icon (`icon.png`) from [scrcpy repository](https://github.com/Genymobile/scrcpy/blob/master/app/data/icon.png).<br>
-Tested on Ubnutu Mantic 23.10 running Hyprland with `swaync`.
+
+Control your phone/emulator's media playback from your notification panel through MPRIS.
+
+This script works independently from scrcpy and does not require it to be installed or running.
+Note that this tool only works on GNU/Linux with MPRIS and only controls media playback — it does not forward audio. Use scrcpy or sndcpy for that.
+
+**Credits:** Default album art icon (`icon.png`) from the [scrcpy repository](https://github.com/Genymobile/scrcpy/blob/master/app/data/icon.png).
+Tested on Ubuntu Mantic 23.10 running Hyprland with `swaync`.
 
 
-## Setup
-Clone this repo, install Python3.12 and create a virtual environment
+## Requirements
+
+- GNU/Linux with D-Bus and MPRIS support
+- `adb` (Android Debug Bridge) with a connected device
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/)
+
+
+## Setup on Fedora
+
+Install system dependencies (needed to build `PyGObject` / `pydbus`, which `mpris-server` relies on):
+
+```bash
+sudo dnf install android-tools python3-devel gobject-introspection-devel cairo-gobject-devel gcc pkg-config
+```
+
+Install `uv` (if you don't have it yet):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Clone the repo and let `uv` set up the environment:
+
 ```bash
 git clone https://github.com/AzlanCoding/scrcpyMediaController
-sudo apt install python3.12 python3.12-venv python3.12-dev libgirepository1.0-dev libcairo2-dev
 cd scrcpyMediaController
-python3.12 -m venv virtualEnv
-source ./virtualEnv/bin/activate
-pip install mpris_server
-exit
+uv sync
 ```
-Once done can remove build packages:
+
+That's it — `uv sync` creates a `.venv` and installs all Python dependencies automatically.
+
+Once done, the build dependencies can be removed if you want to keep the system lean:
+
 ```bash
-sudo apt remove python3.12-dev libgirepository1.0-dev libcairo2-dev
-sudo apt autoremove
+sudo dnf remove python3-devel gobject-introspection-devel cairo-gobject-devel gcc pkg-config
+sudo dnf autoremove
 ```
+
+> **Note:** `android-tools` (for `adb`) should be kept installed.
 
 
 ## Running
-Connect your device to your laptop via `adb` and run the command below.
+
+Connect your device via `adb`, then run:
+
 ```bash
 ./start_scrcpyMediaController.sh
 ```
 
-Alternatively, you can manually activate the environment and run `main.py` using the following commands:
+Or call `uv run` directly:
+
 ```bash
-cd scrcpyMediaPlayer
-source ./virtualEnv/bin/activate
-python main.py
+uv run python main.py
+```
+
+### CLI options
+
+```
+Usage: main.py [OPTIONS]
+
+  scrcpy MPRIS media controller.
+
+  Exposes Android media playback over MPRIS so desktop notification panels
+  (swaync, dunst, waybar, etc.) can display and control it. Requires an
+  ADB-connected Android device.
+
+Options:
+  --art-url TEXT        URI to the album art / player icon.  [default: file:///path/to/icon.png]
+  --player-name TEXT    MPRIS player name exposed on D-Bus.  [default: scrcpy]
+  --update-freq FLOAT   How often (in seconds) to poll ADB for media state.  [default: 1.0]
+  --help                Show this message and exit.
+```
+
+Example with custom options:
+
+```bash
+uv run python main.py --player-name myphone --update-freq 2
 ```
 
 
-## Running in background
-### Setting up
-```bash
-nohup ./start_scrcpyMediaController.sh 0 &
-```
-**DO NOT RUN `./start_scrcpyMediaController.sh & disown`.** Process will hang when `print()` or any standard output is called in the program.
+## Running in the background
 
-### Killing
-use `Btop++` or something to send signal 15 (SIGTERM) and terminate the process with the program named `python`. [Don't use SIGKILL!!!](https://turnoff.us/geek/dont-sigkill/?ref=linuxhandbook.com)
+```bash
+nohup ./start_scrcpyMediaController.sh &
+```
+
+**Do not use `./start_scrcpyMediaController.sh & disown`.** The process will hang when `print()` or any standard output is called.
+
+### Stopping the background process
+
+Send SIGTERM (signal 15) to the `python` process — for example via `btop`, `htop`, or:
+
+```bash
+pkill -f "python main.py"
+```
+
+[Don't use SIGKILL.](https://turnoff.us/geek/dont-sigkill/)
 
 
 ## Customizing
-In `main.py` you can change the 3 variables in lines 10-12
-```python
-artUrl = "file://"+os.path.join(os.path.dirname(__file__), 'icon.png')
-playerName = "scrcpy"
-updateFreq = 1
-```
-`artUrl` holds the location of the album art icon (player icon).<br>
-`playerName` defines the name of the player.<br>
-`updateFreq` specifies how frequent the player checks for updates in seconds.
 
-## To Do
-- Convert the variables above to flags you can pass
-- Windows support using `winrt.windows.media.control.GlobalSystemMediaTransportControlsSessionManager` as suggested by Bing Chat
-- First Release
+Pass options on the command line (see above). The three main knobs are:
+
+| Option | Default | Description |
+|---|---|---|
+| `--art-url` | `file://<repo>/icon.png` | Album art shown in the media widget |
+| `--player-name` | `scrcpy` | Name registered on D-Bus / shown in MPRIS clients |
+| `--update-freq` | `1.0` | Polling interval in seconds |
+
+
+## Setup on Ubuntu / Debian
+
+```bash
+sudo apt install android-tools-adb python3.12 python3.12-dev libgirepository1.0-dev libcairo2-dev pkg-config gcc
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+```
+
+Build dependencies can be removed afterwards:
+
+```bash
+sudo apt remove python3.12-dev libgirepository1.0-dev libcairo2-dev pkg-config gcc
+sudo apt autoremove
+```

@@ -1,3 +1,3 @@
-BASEDIR=$(dirname "$0")
-. $BASEDIR/virtualEnv/bin/activate
-python $BASEDIR/main.py
+#!/usr/bin/env bash
+BASEDIR=$(dirname "$(readlink -f "$0")")
+exec uv run --project "$BASEDIR" python "$BASEDIR/main.py" "$@"

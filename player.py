@@ -79,44 +79,27 @@ class CustomPlayer(MprisInterface):
   @property
   @log_trace
   def CanGoNext(self) -> bool:
-    # if not self.CanControl:
-    # return False
-
     return self.adapter.can_go_next()
 
   @property
   @log_trace
   def CanGoPrevious(self) -> bool:
-    # if not self.CanControl:
-    # return False
-
     return self.adapter.can_go_previous()
 
   @property
   @log_trace
   def CanPause(self) -> bool:
     return self.adapter.can_pause()
-    # if not self.CanControl:
-    # return False
-
-    # return True
 
   @property
   @log_trace
   def CanPlay(self) -> bool:
-    # if not self.CanControl:
-    # return False
-
     return self.adapter.can_play()
 
   @property
   @log_trace
   def CanSeek(self) -> bool:
     return self.adapter.can_seek()
-    # if not self.CanControl:
-    # return False
-
-    # return True
 
   @property
   @log_trace

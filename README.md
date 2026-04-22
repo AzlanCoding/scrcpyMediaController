@@ -1,9 +1,13 @@
 # scrcpyMediaController
+![showcase](./screenshots/showcase-2026-04-22.png)
 
-Exposes Android media playback over MPRIS so desktop notification panels (swaync, dunst, waybar, etc.) can display and control it. Starts `scrcpy --no-window --no-video` alongside the controller and tears it down on exit. Pass `--detach` to manage scrcpy yourself. Run `audiocpy --help` for all options.
+Exposes Android media playback over MPRIS so desktop notification panels (swaync, dunst, waybar, etc.) can display and control it.  
+Starts `scrcpy --no-window --no-video` alongside the controller and tears it down on exit.  
+Pass `--detach` to manage scrcpy yourself. Run `audiocpy --help` for all options.  
+  
+Album art is resolved offline via Android MediaStore only, with cached images stored in `~/.cache/scrcpyMediaController`.  
 
 Requires GNU/Linux with D-Bus, `adb` connected to a device, and `scrcpy` in PATH.
-
 
 ## System dependencies
 
@@ -39,7 +43,12 @@ uv sync
 uv run audiocpy
 ```
 
+## Intentionally unsupported functionality:
+- **Fetching album art for AntennaPod and Spotify** 
+	- the only reliable found method is fetching through Android MediaStore (+ caching), which does not work for these apps
+- **Shuffle/Loop controls** 
+	- at one point they were implemented, but they didn't work. Removed for now, may be reintroduced later.
 
 ## Credits
-
-Default album art icon (`icon.png`) from the [scrcpy repository](https://github.com/Genymobile/scrcpy/blob/master/app/data/icon.png).
+Thanks to the [scrcpy repository](https://github.com/Genymobile/scrcpy/blob/master/app/data/icon.png) for the icon (`icon.png`).
+Thanks to the [original project](https://github.com/AzlanCoding/scrcpyMediaController) for the initial code.

@@ -31,9 +31,8 @@ class AppState:
 		self.title: str = "No Media"
 		self.album: str = ""
 		self.artist: list[str] = []
+		self.package: str = ""
 		self.art_url: str = ""
-		self.shuffle: bool = False
-		self.loop_status: str = "None"
 		self.playbackState: PlayState = PlayState.PLAYING
 		self.media_adapter = None
 		self.oldDevice: bool = False
@@ -43,6 +42,39 @@ class AppState:
 	def _denull(val: str) -> str:
 		"""Coerce the literal string 'null' (sent by some Android versions) to ''."""
 		return "" if val == "null" else val
+
+	@staticmethod
+	def _best_session(media_session: str) -> tuple[str, str, str] | None:
+		"""
+		Return (package, description, playback-state-token) for the best media session.
+		"""
+		pattern = re.compile(r"package=([A-Za-z0-9._]+)(?P<body>(?:(?!\n\s+package=).)*)", re.S)
+		candidates: list[tuple[int, str, str, str]] = []
+		for m in pattern.finditer(media_session):
+			package = m.group(1)
+			body = m.group("body")
+			state_match = re.search(r"state=PlaybackState\s*\{([^}]*)\}", body)
+			desc_match = re.search(r"metadata:\s*size=\d+,\s*description=([^\n]+)", body)
+			if not state_match or not desc_match:
+				continue
+			state_token = state_match.group(1).split(", ")[0]
+			desc = desc_match.group(1).strip()
+			active = "active=true" in body
+
+			score = 0
+			if active:
+				score += 4
+			if state_token in ("state=PLAYING(3)", "state=3"):
+				score += 4
+			elif state_token in ("state=PAUSED(2)", "state=2", "state=BUFFERING(6)", "state=6"):
+				score += 2
+			if desc != "null, null, null" and desc != "null":
+				score += 2
+			candidates.append((score, package, desc, state_token))
+		if not candidates:
+			return None
+		_, package, desc, state_token = max(candidates, key=lambda x: x[0])
+		return package, desc, state_token
 
 	def update(self, emit: bool = True) -> bool:
 		result = subprocess.run(
@@ -55,19 +87,27 @@ class AppState:
 		media_session = result.stdout
 
 		try:
-			desc = media_session.split("description=")[1].split("\n")[0]
-			assert desc != "null"
+			session = self._best_session(media_session)
+			if session is None:
+				raise ValueError("No valid media session found")
+			self.package, desc, status = session
+			if desc == "null":
+				raise ValueError("Session description is null")
 			desc_list = desc.split(", ")
-			assert desc_list != ["null", "null", "null"]
+			if desc_list == ["null", "null", "null"]:
+				raise ValueError("Session description has no metadata")
 
-			self.title = self._denull(desc_list[0]) or "Unknown"
-			self.artist = [a for a in desc_list[1:-1] if a and a != "null"]
-			self.album = self._denull(desc_list[-1])
+			if len(desc_list) >= 3:
+				self.title = self._denull(", ".join(desc_list[:-2])) or "Unknown"
+				artist_field = self._denull(desc_list[-2])
+				self.artist = [artist_field] if artist_field else []
+				self.album = self._denull(desc_list[-1])
+			else:
+				self.title = self._denull(desc_list[0]) or "Unknown"
+				self.artist = [a for a in desc_list[1:-1] if a and a != "null"]
+				self.album = self._denull(desc_list[-1]) if len(desc_list) > 1 else ""
 
 			# -- playback state -------------------------------------------
-			pb = media_session.split("state=PlaybackState {")[1].split("}")[0].split(", ")
-			status = pb[0]
-
 			if len(status) <= 8:
 				self.oldDevice = True
 				if status in ("state=0", "state=1", "state=7", "state=8"):
@@ -77,7 +117,7 @@ class AppState:
 				elif status in ("state=3", "state=4", "state=5", "state=9", "state=10", "state=11"):
 					self.playbackState = PlayState.PLAYING
 				else:
-					print(f"[mediactl] unknown playback status: {pb}")
+					print(f"[mediactl] unknown playback status: {status}")
 			else:
 				self.oldDevice = False
 				if status in ("state=NONE(0)", "state=STOPPED(1)", "state=ERROR(7)", "state=CONNECTING(8)"):
@@ -94,35 +134,33 @@ class AppState:
 				):
 					self.playbackState = PlayState.PLAYING
 				else:
-					print(f"[mediactl] unknown playback status: {pb}")
-
-			# -- shuffle / repeat -----------------------------------------
-			sm = re.search(r"shuffle[_ ]mode\s*[=:]\s*(\d+)", media_session, re.I)
-			if sm:
-				self.shuffle = int(sm.group(1)) >= 2
-
-			rm = re.search(r"repeat[_ ]mode\s*[=:]\s*(\d+)", media_session, re.I)
-			if rm:
-				r = int(rm.group(1))
-				self.loop_status = "Track" if r == 2 else ("Playlist" if r >= 3 else "None")
+					print(f"[mediactl] unknown playback status: {status}")
 
 			# -- album art (background fetch, cached by track identity) ----
 			key = art_cache_key(self.title, self.artist, self.album)
 			if key != self._art_key:
 				self._art_key = key
-				self.art_url = request_art(key, self.title, self._on_art_ready)
+				self.art_url = request_art(
+					key,
+					self.title,
+					self.artist,
+					self.album,
+					self.package,
+					self._on_art_ready,
+				)
 
-		except (IndexError, AssertionError):
+		except (IndexError, ValueError):
 			self.title = "No Media"
 			self.artist = []
 			self.album = ""
+			self.package = ""
 			self.art_url = ""
 			self.playbackState = PlayState.PLAYING
 
 		if self.media_adapter and emit:
 			EventAdapter.emit_changes(
 				self.media_adapter.player,
-				["Metadata", "PlaybackStatus", "Shuffle", "LoopStatus"],
+				["Metadata", "PlaybackStatus"],
 			)
 		return True
 
@@ -197,12 +235,6 @@ class MediaAdapter(PlayerAdapter):
 
 	def get_playstate(self) -> PlayState:
 		return self.app.playbackState
-
-	def get_shuffle(self) -> bool:
-		return self.app.shuffle
-
-	def get_loop_status(self) -> str:
-		return self.app.loop_status
 
 	def get_art_url(self, track) -> str:
 		return self.app.art_url
@@ -289,6 +321,13 @@ class MediaAdapter(PlayerAdapter):
 	help="How often (in seconds) to poll ADB for media state.",
 )
 @click.option(
+	"-v",
+	"--video",
+	is_flag=True,
+	default=False,
+	help="Enable scrcpy video output (starts scrcpy with a window).",
+)
+@click.option(
 	"--detach",
 	is_flag=True,
 	default=False,
@@ -297,6 +336,7 @@ class MediaAdapter(PlayerAdapter):
 def cli(
 	player_name: str,
 	update_freq: float,
+	video: bool,
 	detach: bool,
 ) -> None:
 	"""scrcpy MPRIS media controller.
@@ -305,15 +345,17 @@ def cli(
 	(swaync, dunst, waybar, ...) can display and control it.
 	Requires an ADB-connected Android device.
 
-	By default this also starts `scrcpy --no-window --no-video` and tears it
-	down on exit. Pass --detach to manage scrcpy yourself.
+	By default this starts `scrcpy --no-window --no-video` and tears it down on
+	exit. Pass -v/--video to launch scrcpy with a video window, or --detach to
+	manage scrcpy yourself.
 	"""
 	# -- optionally launch scrcpy -----------------------------------------
 	scrcpy_proc: subprocess.Popen | None = None
 	if not detach:
 		try:
+			scrcpy_cmd = ["scrcpy"] if video else ["scrcpy", "--no-window", "--no-video"]
 			scrcpy_proc = subprocess.Popen(
-				["scrcpy", "--no-window", "--no-video"],
+				scrcpy_cmd,
 				stdout=subprocess.PIPE,
 				stderr=subprocess.STDOUT,
 			)

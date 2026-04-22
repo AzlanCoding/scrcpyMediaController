@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-# NOTE: THIS IS A COPY OF mpris-server.interfaces.player but without `Position`, `Shuffle`, `loop`, `OpenUri`, `Seek`, `SetPosition`, `Rate` and `Volume`
+# NOTE: THIS IS A COPY OF mpris-server.interfaces.player but without
+# `Position`, `LoopStatus`, `Shuffle`, `OpenUri`, `Seek`, `SetPosition`,
+# `Rate` and `Volume`.
 import logging
 from typing import ClassVar, Final
 
@@ -42,10 +44,8 @@ class CustomPlayer(MprisInterface):
 			<property name="{Property.CanPause}" type="{DbusTypes.BOOLEAN}" access="{Access.READ}"/>
 			<property name="{Property.CanPlay}" type="{DbusTypes.BOOLEAN}" access="{Access.READ}"/>
 			<property name="{Property.CanSeek}" type="{DbusTypes.BOOLEAN}" access="{Access.READ}"/>
-			<property name="{Property.LoopStatus}" type="{DbusTypes.STRING}" access="{Access.READ}"/>
 			<property name="{Property.Metadata}" type="{DbusTypes.METADATA}" access="{Access.READ}"/>
 			<property name="{Property.PlaybackStatus}" type="{DbusTypes.STRING}" access="{Access.READ}"/>
-			<property name="{Property.Shuffle}" type="{DbusTypes.BOOLEAN}" access="{Access.READ}"/>
 
 			<signal name="{Signal.Seeked}">
 				<arg name="{Arg.Position}" type="{DbusTypes.INT64}"/>
@@ -130,16 +130,6 @@ class CustomPlayer(MprisInterface):
 	def PlaybackStatus(self) -> PlayState:
 		state = self.adapter.get_playstate()
 		return state.value.title()
-
-	@property
-	@log_trace
-	def Shuffle(self) -> bool:
-		return self.adapter.get_shuffle()
-
-	@property
-	@log_trace
-	def LoopStatus(self) -> str:
-		return self.adapter.get_loop_status()
 
 	@log_trace
 	def Next(self):

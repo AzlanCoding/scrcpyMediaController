@@ -6,8 +6,7 @@ This program does two things:
 2. Exposes Android media playback over MPRIS so desktop notification panels (swaync, dunst, waybar, etc.) can display and control it.  
   
 I built it so that I can listen to a podcast from my phone while playing a game on my pc, and mix the audio on pc.  
-An alternative sync is an A2DP sink but that introduces latency, lag & quality loss if you have multiple devices connected over bluetooth e.g. Xbox Controller, Wireless headphones (connected to PC) and Phone (streaming audio to PC).  
-If you only connect your phone (e.g. have wired headphones and use mouse&keyboard for that game), you may not need this/scrcpy at all and A2DP might be sufficient.  
+An alternative sync is an A2DP sink but that introduces latency, lag & quality loss if you have multiple devices connected over bluetooth e.g. Xbox Controller, Wireless headphones (connected to PC) and Phone (streaming audio to PC). If you only connect your phone (e.g. have wired headphones and use mouse&keyboard for that game), you may not need this/scrcpy at all and A2DP might be sufficient.  
   
 I have only tested this on linux. It will **not** work on Windows or MacOS, since they don't use MPRIS, but their own thing. On those OSes you can just do `scrcpy --no-window --no-video` and you get the audio part without the media controls.  
   

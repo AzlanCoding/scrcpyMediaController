@@ -349,6 +349,8 @@ def cli(
 	exit. Pass -v/--video to launch scrcpy with a video window, or --detach to
 	manage scrcpy yourself.
 	"""
+	exit_event = Event()
+
 	# -- optionally launch scrcpy -----------------------------------------
 	scrcpy_proc: subprocess.Popen | None = None
 	if not detach:
@@ -364,7 +366,14 @@ def cli(
 				for raw in proc.stdout:
 					print(f"[scrcpy] {raw.decode(errors='replace').rstrip()}")
 
+			def _watch_scrcpy(proc: subprocess.Popen) -> None:
+				proc.wait()
+				if not exit_event.is_set():
+					print("[mediactl] scrcpy exited — exiting")
+					os.kill(os.getpid(), signal.SIGTERM)
+
 			Thread(target=_drain, args=(scrcpy_proc,), daemon=True).start()
+			Thread(target=_watch_scrcpy, args=(scrcpy_proc,), daemon=True).start()
 			print("[mediactl] scrcpy started")
 		except FileNotFoundError:
 			print("[mediactl] scrcpy not found in PATH — continuing without it")
@@ -373,7 +382,6 @@ def cli(
 	app = AppState()
 	app.update(emit=False)
 
-	exit_event = Event()
 	update_thread = UpdateThread(app, update_freq, exit_event)
 	update_thread.start()
 

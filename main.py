@@ -360,6 +360,7 @@ def cli(
 				scrcpy_cmd,
 				stdout=subprocess.PIPE,
 				stderr=subprocess.STDOUT,
+				start_new_session=True,
 			)
 
 			def _drain(proc: subprocess.Popen) -> None:
@@ -402,11 +403,18 @@ def cli(
 		exit_event.set()
 		update_thread.join()
 		if scrcpy_proc is not None:
-			scrcpy_proc.terminate()
 			try:
+				pgid = os.getpgid(scrcpy_proc.pid)
+				os.killpg(pgid, signal.SIGTERM)
 				scrcpy_proc.wait(timeout=3)
+			except (ProcessLookupError, PermissionError):
+				pass
 			except subprocess.TimeoutExpired:
-				scrcpy_proc.kill()
+				try:
+					pgid = os.getpgid(scrcpy_proc.pid)
+					os.killpg(pgid, signal.SIGKILL)
+				except (ProcessLookupError, PermissionError):
+					pass
 
 
 if __name__ == "__main__":

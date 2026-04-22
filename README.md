@@ -7,15 +7,16 @@ This program does two things:
   
 I built it so that I can listen to a podcast from my phone while playing a game on my pc, and mix the audio on pc.  
 An alternative sync is an A2DP sink but that introduces latency, lag & quality loss if you have multiple devices connected over bluetooth e.g. Xbox Controller, Wireless headphones (connected to PC) and Phone (streaming audio to PC).  
-I have only tested this on linux. It may work on windows or MacOS, I have no idea. If you get it working on Win/Mac, feel free to PR the changes.
-
-You need to install [scrcpy](https://scrcpy.org) ([github](https://github.com/genymobile/scrcpy), [repology](https://repology.org/project/scrcpy/versions)).
-Starts `scrcpy --no-window --no-video` alongside the controller and tears it down on exit.  
-Pass `--detach` to manage scrcpy yourself. Run `audiocpy --help` for all options.  
+I have only tested this on linux. It may work on windows or MacOS, I have no idea. If you get it working on Win/Mac, feel free to PR the changes.  
+  
+You need to install [scrcpy](https://scrcpy.org) ([github](https://github.com/genymobile/scrcpy), [repology](https://repology.org/project/scrcpy/versions)).  
+Requires GNU/Linux with D-Bus, `adb` connected to a device, and `scrcpy` in PATH.  
+  
+audiocpy starts `scrcpy --no-window --no-video` alongside the controller and tears it down on exit; you can pass `--detach` to manage scrcpy yourself.  
+Run `audiocpy --help` for all options.  
+  
 Album art is resolved offline via Android MediaStore only, with cached images stored in `~/.cache/scrcpyMediaController`.  
-
-Requires GNU/Linux with D-Bus, `adb` connected to a device, and `scrcpy` in PATH.
-
+  
 ## System dependencies
 
 **Fedora:**

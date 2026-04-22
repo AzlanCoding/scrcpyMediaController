@@ -7,7 +7,9 @@ This program does two things:
   
 I built it so that I can listen to a podcast from my phone while playing a game on my pc, and mix the audio on pc.  
 An alternative sync is an A2DP sink but that introduces latency, lag & quality loss if you have multiple devices connected over bluetooth e.g. Xbox Controller, Wireless headphones (connected to PC) and Phone (streaming audio to PC).  
-I have only tested this on linux. It may work on windows or MacOS, I have no idea. If you get it working on Win/Mac, feel free to PR the changes.  
+If you only connect your phone (e.g. have wired headphones and use mouse&keyboard for that game), you may not need this/scrcpy at all and A2DP might be sufficient.  
+  
+I have only tested this on linux. It will **not** work on Windows or MacOS, since they don't use MPRIS, but their own thing. On those OSes you can just do `scrcpy --no-window --no-video` and you get the audio part without the media controls.  
   
 You need to install [scrcpy](https://scrcpy.org) ([github](https://github.com/genymobile/scrcpy), [repology](https://repology.org/project/scrcpy/versions)).  
 Requires GNU/Linux with D-Bus, `adb` connected to a device, and `scrcpy` in PATH.  

@@ -29,6 +29,7 @@ _BLACKLISTED_PACKAGES: set[str] = {
 	"com.spotify.music",
 	"de.danoeh.antennapod",
 	"de.danoeh.antennapod.debug",
+	"com.android.chrome"
 }
 
 _cache: dict[str, str] = {}

@@ -39,7 +39,7 @@ The compiler and dev headers are only needed at install time to build `pydbus`/`
 With the system dependencies above in place:
 
 ```bash
-uv tool install git+https://github.com/KraXen72/scrcpyMediaController
+uv tool install git+https://github.com/AzlanCoding/scrcpyMediaController
 audiocpy
 ```
 
@@ -47,18 +47,18 @@ audiocpy
 ## Local development
 
 ```bash
-git clone https://github.com/KraXen72/scrcpyMediaController
+git clone https://github.com/AzlanCoding/scrcpyMediaController
 cd scrcpyMediaController
 uv sync
 uv run audiocpy
 ```
 
 ## Intentionally unsupported functionality:
-- **Fetching album art for AntennaPod and Spotify** 
+- **Fetching album art for Google Chrome, AntennaPod and Spotify** 
 	- the only reliable found method is fetching through Android MediaStore (+ caching), which does not work for these apps
 - **Shuffle/Loop controls** 
 	- at one point they were implemented, but they didn't work. Removed for now, may be reintroduced later.
 
 ## Credits
 Thanks to the [scrcpy repository](https://github.com/Genymobile/scrcpy/blob/master/app/data/icon.png) for the icon (`icon.png`).
-Thanks to the [original project](https://github.com/AzlanCoding/scrcpyMediaController) for the initial code.
+Thanks to the [@KraXen72](https://github.com/KraXen72) for the [https://github.com/AzlanCoding/scrcpyMediaController/pull/1](pull request) (the script was rewritten to move to uv and add some support for album art).

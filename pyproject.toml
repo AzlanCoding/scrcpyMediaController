@@ -1,0 +1,20 @@
+[project]
+name = "scrcpy-media-controller"
+version = "0.1.0"
+description = "Control Android media playback via MPRIS over ADB"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mpris-server",
+    "click",
+]
+
+[project.scripts]
+audiocpy = "main:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["main.py", "player.py", "album_art.py", "icon.png"]

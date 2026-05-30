@@ -1,2 +1,4 @@
 virtualEnv/
 __pycache__/
+repomix-output.xml
+.venv

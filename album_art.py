@@ -25,6 +25,7 @@ from threading import Thread
 
 _CACHE_DIR = Path.home() / ".cache" / "scrcpyMediaController"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_DEFAULT_ICON_PATH = f"file://{Path(__file__).resolve().parent / "icon.png"}"
 _BLACKLISTED_PACKAGES: set[str] = {
 	"com.spotify.music",
 	"de.danoeh.antennapod",
@@ -98,7 +99,7 @@ def _read_album_art(album_id: str) -> str:
 			timeout=8,
 		)
 		if pull.returncode != 0 or not pull.stdout:
-			return ""
+			return _DEFAULT_ICON_PATH
 		fd, tmp_path = tempfile.mkstemp(dir=_CACHE_DIR, suffix=".tmp")
 		try:
 			with os.fdopen(fd, "wb") as tmp_file:
@@ -111,18 +112,18 @@ def _read_album_art(album_id: str) -> str:
 
 	if not _is_supported_image(dest):
 		dest.unlink(missing_ok=True)
-		return ""
+		return _DEFAULT_ICON_PATH
 	return f"file://{dest}"
 
 
 def _fetch(title: str, package: str) -> str:
 	if package in _BLACKLISTED_PACKAGES:
-		return ""
+		return _DEFAULT_ICON_PATH
 	try:
 		album_id = _query_album_id(title)
 		return _read_album_art(album_id) if album_id else ""
 	except Exception:
-		return ""
+		return _DEFAULT_ICON_PATH
 
 
 def art_cache_key(title: str, artist: list[str], album: str) -> str:
@@ -139,8 +140,8 @@ def request_art(
 ) -> str:
 	if package in _BLACKLISTED_PACKAGES:
 		with _cache_lock:
-			_cache[key] = ""
-		return ""
+			_cache[key] = _DEFAULT_ICON_PATH
+		return _DEFAULT_ICON_PATH
 
 	album_key = _album_identity(package, artist, album)
 	with _cache_lock:
@@ -153,7 +154,7 @@ def request_art(
 				return album_uri
 			_album_cache.pop(album_key, None)
 		if key in _in_flight:
-			return ""
+			return _DEFAULT_ICON_PATH
 		_in_flight.add(key)
 
 	def _worker() -> None:
@@ -166,4 +167,4 @@ def request_art(
 		on_ready(key, uri)
 
 	Thread(target=_worker, daemon=True).start()
-	return ""
+	return _DEFAULT_ICON_PATH

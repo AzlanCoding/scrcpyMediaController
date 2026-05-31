@@ -61,4 +61,4 @@ uv run audiocpy
 
 ## Credits
 Thanks to the [scrcpy repository](https://github.com/Genymobile/scrcpy/blob/master/app/data/icon.png) for the icon (`icon.png`).
-Thanks to the [@KraXen72](https://github.com/KraXen72) for the [https://github.com/AzlanCoding/scrcpyMediaController/pull/1](pull request) (the script was rewritten to move to uv and add some support for album art).
+Thanks to the [@KraXen72](https://github.com/KraXen72) for the [pull request](https://github.com/AzlanCoding/scrcpyMediaController/pull/1) (the script was rewritten to move to uv and add some support for album art).

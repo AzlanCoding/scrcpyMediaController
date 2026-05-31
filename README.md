@@ -4,12 +4,11 @@
 This program does two things:  
 1. Shares audio from connected device to the pc, supressing it on the original device.  
 2. Exposes Android media playback over MPRIS so desktop notification panels (swaync, dunst, waybar, etc.) can display and control it.  
-  
-I built it so that I can listen to a podcast from my phone while playing a game on my pc, and mix the audio on pc.  
+ 
 An alternative sync is an A2DP sink but that introduces latency, lag & quality loss if you have multiple devices connected over bluetooth e.g. Xbox Controller, Wireless headphones (connected to PC) and Phone (streaming audio to PC). If you only connect your phone (e.g. have wired headphones and use mouse&keyboard for that game), you may not need this/scrcpy at all and A2DP might be sufficient.  
   
-For now, this only works on linux. It will **not** work on Windows or MacOS, since they don't use MPRIS, but their own thing. On those OSes you can just do `scrcpy --no-window --no-video` and you get the audio part without the media controls.  
-Windows support or MacOS support is possible, but since I don't use either of those (for now), I will not implement it (for now).  
+For now, this only works on linux. It will **not** work on Windows or MacOS, since they don't use MPRIS, but their own thing. On those OSes you can just do `scrcpy --no-window --no-video` and you get the audio part without the media controls. 
+Windows support or MacOS support might be possible but it is not implemented (for now).  
   
 You need to install [scrcpy](https://scrcpy.org) ([github](https://github.com/genymobile/scrcpy), [repology](https://repology.org/project/scrcpy/versions)).  
 Requires GNU/Linux with D-Bus, `adb` connected to a device, and `scrcpy` in PATH.  
@@ -60,5 +59,5 @@ uv run audiocpy
 	- at one point they were implemented, but they didn't work. Removed for now, may be reintroduced later.
 
 ## Credits
-Thanks to the [scrcpy repository](https://github.com/Genymobile/scrcpy/blob/master/app/data/icon.png) for the icon (`icon.png`).
-Thanks to the [@KraXen72](https://github.com/KraXen72) for the [pull request](https://github.com/AzlanCoding/scrcpyMediaController/pull/1) (the script was rewritten to move to uv and add some support for album art).
+- Thanks to the [scrcpy repository](https://github.com/Genymobile/scrcpy/blob/master/app/data/icon.png) for the icon (`icon.png`).
+- Thanks to [@KraXen72](https://github.com/KraXen72) for the [pull request](https://github.com/AzlanCoding/scrcpyMediaController/pull/1) (the script was rewritten to move to uv and add some support for album art).

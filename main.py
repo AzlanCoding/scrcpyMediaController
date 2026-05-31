@@ -1,231 +1,421 @@
-import os
+#!/usr/bin/env python3
+"""
+scrcpy MPRIS media controller.
+
+Exposes Android media playback over MPRIS so desktop notification panels
+(swaync, dunst, waybar, …) can display and control it.
+Requires an ADB-connected Android device.
+"""
+
+import os  # at the top of the file
+import re
+import signal
 import subprocess
-from threading import Timer, Thread, Event
-from mpris_server.adapters import PlayState, PlayerAdapter
+from threading import Event, Thread
+
+import click
+from mpris_server.adapters import PlayerAdapter, PlayState
 from mpris_server.events import EventAdapter
 from mpris_server.server import Server
+
+from album_art import art_cache_key, request_art
 from player import CustomPlayer
 
-#Modify these variables to customise the player
-artUrl = "file://"+os.path.join(os.path.dirname(__file__), 'icon.png')
-playerName = "scrcpy"
-updateFreq = 1
+# ---------------------------------------------------------------------------
+# App state
+# ---------------------------------------------------------------------------
 
-class app:
-  def __init__(self):
-    self.title = "No Media"
-    self.album = "Unknown"
-    self.artist = []
-    self.currentPosition = 0
-    self.playbackState = PlayState.PLAYING
-    self.media_adapter = None
-    self.oldDevice = False
 
-  def update(self) -> None:
-    media_session = subprocess.run(["adb","shell","dumpsys","media_session"], capture_output=True, text=True).stdout
-    
-    try:
-      desc = media_session.split("description=")[1].split("\n")[0]
-      assert desc != "null"
-      descList = desc.split(", ")
-      assert descList != ["null","null","null"] #Media is Buffering
+class AppState:
+	def __init__(self) -> None:
+		self.title: str = "No Media"
+		self.album: str = ""
+		self.artist: list[str] = []
+		self.package: str = ""
+		self.art_url: str = ""
+		self.playbackState: PlayState = PlayState.PLAYING
+		self.media_adapter = None
+		self.oldDevice: bool = False
+		self._art_key: str = ""
 
-      self.title = descList[0]
-      self.artist = descList[1:-1]#Song may have multiple artists
-      self.album = descList[-1]
+	@staticmethod
+	def _denull(val: str) -> str:
+		"""Coerce the literal string 'null' (sent by some Android versions) to ''."""
+		return "" if val == "null" else val
 
-      playback_state = media_session.split("state=PlaybackState {")[1].split("}")[0].split(", ")
-      playbackStatus = playback_state[0]
+	@staticmethod
+	def _best_session(media_session: str) -> tuple[str, str, str] | None:
+		"""
+		Return (package, description, playback-state-token) for the best media session.
+		"""
+		pattern = re.compile(r"package=([A-Za-z0-9._]+)(?P<body>(?:(?!\n\s+package=).)*)", re.S)
+		candidates: list[tuple[int, str, str, str]] = []
+		for m in pattern.finditer(media_session):
+			package = m.group(1)
+			body = m.group("body")
+			state_match = re.search(r"state=PlaybackState\s*\{([^}]*)\}", body)
+			desc_match = re.search(r"metadata:\s*size=\d+,\s*description=([^\n]+)", body)
+			if not state_match or not desc_match:
+				continue
+			state_token = state_match.group(1).split(", ")[0]
+			desc = desc_match.group(1).strip()
+			active = "active=true" in body
 
-      if len(playbackStatus) <= 8:
-        #Support for older versions of Android
-        self.oldDevice = True
-        if playbackStatus == "state=0" or playbackStatus == "state=1" or \
-           playbackStatus == "state=7" or playbackStatus == "state=8":
-          self.playackState = PlayState.STOPPED
-        elif playbackStatus == "state=2" or playbackStatus == "state=6":
-          self.playbackState = PlayState.PAUSED
-        elif playbackStatus == "state=3" or playbackStatus == "state=4" or \
-             playbackStatus == "state=5" or playbackStatus == "state=9" or \
-             playbackStatus == "state=10" or playbackStatus == "state=11":
-          self.playbackState = PlayState.PLAYING
-        else:
-          print("Error: unknown playback status\n" + str(playback_state))
-      else:
-        self.oldDevice = False
-        if playbackStatus == "state=NONE(0)" or playbackStatus == "state=STOPPED(1)" or \
-           playbackStatus == "state=ERROR(7)" or playbackStatus == "state=CONNECTING(8)":
-          self.playackState = PlayState.STOPPED
-        elif playbackStatus == "state=PAUSED(2)" or playbackStatus == "state=BUFFERING(6)":
-          self.playbackState = PlayState.PAUSED
-        elif playbackStatus == "state=PLAYING(3)" or playbackStatus == "state=FAST_FORWARDING(4)" or \
-             playbackStatus == "state=REWINDING(5)" or playbackStatus == "state=SKIPPING_TO_PREVIOUS(9)" or \
-             playbackStatus == "state=SKIPPING_TO_NEXT(10)" or playbackStatus == "state=SKIPPING_TO_QUEUE_ITEM(11)":
-          self.playbackState = PlayState.PLAYING
-        else:
-          print("Error: unknown playback status\n" + str(playback_state))
+			score = 0
+			if active:
+				score += 4
+			if state_token in ("state=PLAYING(3)", "state=3"):
+				score += 4
+			elif state_token in ("state=PAUSED(2)", "state=2", "state=BUFFERING(6)", "state=6"):
+				score += 2
+			if desc != "null, null, null" and desc != "null":
+				score += 2
+			candidates.append((score, package, desc, state_token))
+		if not candidates:
+			return None
+		_, package, desc, state_token = max(candidates, key=lambda x: x[0])
+		return package, desc, state_token
 
-    except (IndexError, AssertionError):
-      self.title = "No Media"
-      self.artist = []
-      self.album = "Unknown"
-      self.playbackState = PlayState.PLAYING
-    
-    if self.media_adapter:
-      EventAdapter.emit_changes(self.media_adapter.player,["Metadata","PlaybackStatus"])
+	def update(self, emit: bool = True) -> bool:
+		result = subprocess.run(
+			["adb", "shell", "dumpsys", "media_session"],
+			capture_output=True,
+			text=True,
+		)
+		if result.returncode != 0:
+			return False
+		media_session = result.stdout
 
-  def sendKeyCode(self, keyCode: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["adb", "shell", "input", "keyevent", keyCode])
+		try:
+			session = self._best_session(media_session)
+			if session is None:
+				raise ValueError("No valid media session found")
+			self.package, desc, status = session
+			if desc == "null":
+				raise ValueError("Session description is null")
+			desc_list = desc.split(", ")
+			if desc_list == ["null", "null", "null"]:
+				raise ValueError("Session description has no metadata")
 
-  def dispatchMediaKey(self, key: str) -> subprocess.CompletedProcess:
-    if self.oldDevice == True:
-      return subprocess.run(["adb", "shell", "media", "dispatch", key])
-    else:
-      return subprocess.run(["adb", "shell", "cmd", "media_session", "dispatch", key])
+			if len(desc_list) >= 3:
+				self.title = self._denull(", ".join(desc_list[:-2])) or "Unknown"
+				artist_field = self._denull(desc_list[-2])
+				self.artist = [artist_field] if artist_field else []
+				self.album = self._denull(desc_list[-1])
+			else:
+				self.title = self._denull(desc_list[0]) or "Unknown"
+				self.artist = [a for a in desc_list[1:-1] if a and a != "null"]
+				self.album = self._denull(desc_list[-1]) if len(desc_list) > 1 else ""
 
-App = app()
-App.update()
+			# -- playback state -------------------------------------------
+			if len(status) <= 8:
+				self.oldDevice = True
+				if status in ("state=0", "state=1", "state=7", "state=8"):
+					self.playbackState = PlayState.STOPPED
+				elif status in ("state=2", "state=6"):
+					self.playbackState = PlayState.PAUSED
+				elif status in ("state=3", "state=4", "state=5", "state=9", "state=10", "state=11"):
+					self.playbackState = PlayState.PLAYING
+				else:
+					print(f"[mediactl] unknown playback status: {status}")
+			else:
+				self.oldDevice = False
+				if status in ("state=NONE(0)", "state=STOPPED(1)", "state=ERROR(7)", "state=CONNECTING(8)"):
+					self.playbackState = PlayState.STOPPED
+				elif status in ("state=PAUSED(2)", "state=BUFFERING(6)"):
+					self.playbackState = PlayState.PAUSED
+				elif status in (
+					"state=PLAYING(3)",
+					"state=FAST_FORWARDING(4)",
+					"state=REWINDING(5)",
+					"state=SKIPPING_TO_PREVIOUS(9)",
+					"state=SKIPPING_TO_NEXT(10)",
+					"state=SKIPPING_TO_QUEUE_ITEM(11)",
+				):
+					self.playbackState = PlayState.PLAYING
+				else:
+					print(f"[mediactl] unknown playback status: {status}")
 
+			# -- album art (background fetch, cached by track identity) ----
+			key = art_cache_key(self.title, self.artist, self.album)
+			if key != self._art_key:
+				self._art_key = key
+				self.art_url = request_art(
+					key,
+					self.title,
+					self.artist,
+					self.album,
+					self.package,
+					self._on_art_ready,
+				)
+
+		except (IndexError, ValueError):
+			self.title = "No Media"
+			self.artist = []
+			self.album = ""
+			self.package = ""
+			self.art_url = ""
+			self.playbackState = PlayState.PLAYING
+
+		if self.media_adapter and emit:
+			EventAdapter.emit_changes(
+				self.media_adapter.player,
+				["Metadata", "PlaybackStatus"],
+			)
+		return True
+
+	def _on_art_ready(self, key: str, uri: str) -> None:
+		if uri and self._art_key == key:
+			self.art_url = uri
+			if self.media_adapter:
+				EventAdapter.emit_changes(self.media_adapter.player, ["Metadata"])
+
+	def dispatch_media_key(self, key: str) -> subprocess.CompletedProcess:
+		if self.oldDevice:
+			return subprocess.run(["adb", "shell", "media", "dispatch", key])
+		return subprocess.run(["adb", "shell", "cmd", "media_session", "dispatch", key])
+
+
+# ---------------------------------------------------------------------------
+# Update thread
+# ---------------------------------------------------------------------------
 
 
 class UpdateThread(Thread):
-    def __init__(self, event):
-        Thread.__init__(self)
-        self.exit = event
+	def __init__(self, app: AppState, update_freq: float, exit_event: Event) -> None:
+		super().__init__(daemon=True, name="update-thread")
+		self.app = app
+		self.update_freq = update_freq
+		self.exit = exit_event
 
-    def run(self):
-        while not self.exit.wait(updateFreq):
-            App.update()
+	def run(self) -> None:
+		while not self.exit.wait(self.update_freq):
+			if not self.app.update():
+				print("[mediactl] device disconnected — exiting")
+				os.kill(os.getpid(), signal.SIGTERM)
+				break
 
-exitEvent = Event()
-thread = UpdateThread(exitEvent)
-thread.start()
+
+# ---------------------------------------------------------------------------
+# MPRIS adapter
+# ---------------------------------------------------------------------------
 
 
 class MediaAdapter(PlayerAdapter):
-  def next(self) -> None:
-    #adb shell input keyevent KEYCODE_MEDIA_NEXT
-    #adb shell cmd media_session dispatch next
-    print("next")
-    #App.sendKeyCode("KEYCODE_MEDIA_NEXT")
-    App.dispatchMediaKey("next")
-    App.update()
+	def __init__(self, app: AppState) -> None:
+		super().__init__()
+		self.app = app
 
-  def previous(self) -> None:
-    #adb shell input keyevent KEYCODE_MEDIA_PREVIOUS
-    #adb shell cmd media_session dispatch previous
-    print("prev")
-    #App.sendKeyCode("KEYCODE_MEDIA_PREVIOUS")
-    App.dispatchMediaKey("previous")
-    App.update()
+	def _cmd(self, label: str, key: str) -> None:
+		print(f"[mediactl] {label}")
+		self.app.dispatch_media_key(key)
+		self.app.update()
 
-  def pause(self) -> None:
-    #adb shell input keyevent KEYCODE_MEDIA_PAUSE
-    #adb shell cmd media_session dispatch pause
-    print('pause')
-    #App.sendKeyCode("KEYCODE_MEDIA_PAUSE")
-    App.dispatchMediaKey("pause")
-    App.update()
+	# -- commands -----------------------------------------------------------
 
-  def resume(self) -> None:
-    #adb shell input keyevent KEYCODE_MEDIA_PLAY
-    #adb shell cmd media_session dispatch play
-    print("resume")
-    #App.sendKeyCode("KEYCODE_MEDIA_PLAY")
-    App.dispatchMediaKey("play")
-    App.update()
+	def next(self) -> None:
+		self._cmd("next", "next")
 
-  def stop(self) -> None:
-    #adb shell input keyevent KEYCODE_MEDIA_STOP
-    #adb shell cmd media_session dispatch stop
-    print("stop")
-    #App.sendKeyCode("KEYCODE_MEDIA_STOP")
-    App.dispatchMediaKey("stop")
-    App.update()
+	def previous(self) -> None:
+		self._cmd("prev", "previous")
 
-  def play(self) -> None:
-    #adb shell input keyevent KEYCODE_MEDIA_PLAY
-    #adb shell cmd media_session dispatch play
-    print("play")
-    #App.sendKeyCode("KEYCODE_MEDIA_PLAY")
-    App.dispatchMediaKey("play")
-    App.update()
+	def pause(self) -> None:
+		self._cmd("pause", "pause")
 
-  def get_playstate(self) -> PlayState:
-    return App.playbackState
+	def resume(self) -> None:
+		self._cmd("resume", "play")
 
-  def get_art_url(self, track):
-    return artUrl
+	def stop(self) -> None:
+		self._cmd("stop", "stop")
 
-  def can_go_next(self) -> bool:
-    return True
+	def play(self) -> None:
+		self._cmd("play", "play")
 
-  def can_go_previous(self) -> bool:
-    return True
+	# -- state --------------------------------------------------------------
 
-  def can_play(self) -> bool:
-    return True
+	def get_playstate(self) -> PlayState:
+		return self.app.playbackState
 
-  def can_pause(self) -> bool:
-    return True
+	def get_art_url(self, track) -> str:
+		return self.app.art_url
 
-  def can_seek(self) -> bool:
-    return False
+	# -- capabilities -------------------------------------------------------
 
-  def can_control(self) -> bool:
-    return True
+	def can_go_next(self) -> bool:
+		return True
 
-  def can_quit(self) -> bool:
-    return False
+	def can_go_previous(self) -> bool:
+		return True
 
-  def can_raise(self) -> bool:
-    return False
+	def can_play(self) -> bool:
+		return True
 
-  def has_tracklist(self) -> bool:
-    return False
+	def can_pause(self) -> bool:
+		return True
 
-  def can_fullscreen(self) -> bool:
-    return False
+	def can_seek(self) -> bool:
+		return False
 
-  def get_fullscreen(self) -> None:
-    return None
+	def can_control(self) -> bool:
+		return True
 
-  def get_stream_title(self) -> str:
-    return App.title
+	def can_quit(self) -> bool:
+		return False
 
-  def get_desktop_entry(self) -> str:
-    return "scrcpy"
+	def can_raise(self) -> bool:
+		return False
 
-  def get_mime_types(self) -> list[str]:
-    return ["audio/mpeg", "application/ogg", "video/mpeg"]
+	def has_tracklist(self) -> bool:
+		return False
 
-  def get_uri_schemes(self) -> list[str]:
-    return ["file"]
+	def can_fullscreen(self) -> bool:
+		return False
 
-  def metadata(self) -> dict:
-    metadata = {
-      "mpris:artUrl": artUrl,
-      "mpris:trackid": '/org/mpris/MediaPlayer2/scrcpy',
-      "xesam:title": App.title,
-      "xesam:artist": App.artist,
-      "xesam:album": App.album
-    }
+	def get_fullscreen(self) -> None:
+		return None
 
-    return metadata
-    
-media_adapter = MediaAdapter()
-mpris = Server(name=playerName, adapter=media_adapter)
-mpris.player = CustomPlayer(name=playerName, adapter=media_adapter)
-mpris.interfaces = mpris.root, mpris.player
-App.media_adapter = mpris
+	# -- info ---------------------------------------------------------------
 
-try:
-  mpris.loop()
-except KeyboardInterrupt:
-  pass
-except RuntimeError:
-  print(playerName + " Media Controller already running!")
-finally:
-  print("quitting...")
-  exitEvent.set()
-  thread.join()
+	def get_stream_title(self) -> str:
+		return self.app.title
+
+	def get_desktop_entry(self) -> str:
+		return "scrcpy"
+
+	def get_mime_types(self) -> list[str]:
+		return ["audio/mpeg", "application/ogg", "video/mpeg"]
+
+	def get_uri_schemes(self) -> list[str]:
+		return ["file"]
+
+	def metadata(self) -> dict:
+		meta: dict = {
+			"mpris:trackid": "/org/mpris/MediaPlayer2/scrcpy",
+			"xesam:title": self.app.title,
+			"xesam:artist": self.app.artist,
+		}
+		if self.app.album:
+			meta["xesam:album"] = self.app.album
+		if self.app.art_url:
+			meta["mpris:artUrl"] = self.app.art_url
+		return meta
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+@click.command()
+@click.option(
+	"--player-name",
+	default="scrcpy",
+	show_default=True,
+	help="MPRIS player name exposed on D-Bus.",
+)
+@click.option(
+	"--update-freq",
+	default=1.0,
+	show_default=True,
+	type=float,
+	help="How often (in seconds) to poll ADB for media state.",
+)
+@click.option(
+	"-v",
+	"--video",
+	is_flag=True,
+	default=False,
+	help="Enable scrcpy video output (starts scrcpy with a window).",
+)
+@click.option(
+	"--detach",
+	is_flag=True,
+	default=False,
+	help="Do not start or manage scrcpy. Lets you handle the scrcpy lifecycle yourself.",
+)
+def cli(
+	player_name: str,
+	update_freq: float,
+	video: bool,
+	detach: bool,
+) -> None:
+	"""scrcpy MPRIS media controller.
+
+	Exposes Android media playback over MPRIS so desktop notification panels
+	(swaync, dunst, waybar, ...) can display and control it.
+	Requires an ADB-connected Android device.
+
+	By default this starts `scrcpy --no-window --no-video` and tears it down on
+	exit. Pass -v/--video to launch scrcpy with a video window, or --detach to
+	manage scrcpy yourself.
+	"""
+	exit_event = Event()
+
+	# -- optionally launch scrcpy -----------------------------------------
+	scrcpy_proc: subprocess.Popen | None = None
+	if not detach:
+		try:
+			scrcpy_cmd = ["scrcpy"] if video else ["scrcpy", "--no-window", "--no-video"]
+			scrcpy_proc = subprocess.Popen(
+				scrcpy_cmd,
+				stdout=subprocess.PIPE,
+				stderr=subprocess.STDOUT,
+				start_new_session=True,
+			)
+
+			def _drain(proc: subprocess.Popen) -> None:
+				for raw in proc.stdout:
+					print(f"[scrcpy] {raw.decode(errors='replace').rstrip()}")
+
+			def _watch_scrcpy(proc: subprocess.Popen) -> None:
+				proc.wait()
+				if not exit_event.is_set():
+					print("[mediactl] scrcpy exited — exiting")
+					os.kill(os.getpid(), signal.SIGTERM)
+
+			Thread(target=_drain, args=(scrcpy_proc,), daemon=True).start()
+			Thread(target=_watch_scrcpy, args=(scrcpy_proc,), daemon=True).start()
+			print("[mediactl] scrcpy started")
+		except FileNotFoundError:
+			print("[mediactl] scrcpy not found in PATH — continuing without it")
+
+	# -- MPRIS setup ------------------------------------------------------
+	app = AppState()
+	app.update(emit=False)
+
+	update_thread = UpdateThread(app, update_freq, exit_event)
+	update_thread.start()
+
+	media_adapter = MediaAdapter(app)
+	mpris = Server(name=player_name, adapter=media_adapter)
+	mpris.player = CustomPlayer(name=player_name, adapter=media_adapter)
+	mpris.interfaces = mpris.root, mpris.player
+	app.media_adapter = mpris
+
+	try:
+		mpris.loop()
+	except KeyboardInterrupt:
+		pass
+	except RuntimeError:
+		print(f"[mediactl] {player_name} media controller is already running!")
+	finally:
+		print("[mediactl] quitting...")
+		exit_event.set()
+		update_thread.join()
+		if scrcpy_proc is not None:
+			try:
+				pgid = os.getpgid(scrcpy_proc.pid)
+				os.killpg(pgid, signal.SIGTERM)
+				scrcpy_proc.wait(timeout=3)
+			except (ProcessLookupError, PermissionError):
+				pass
+			except subprocess.TimeoutExpired:
+				try:
+					pgid = os.getpgid(scrcpy_proc.pid)
+					os.killpg(pgid, signal.SIGKILL)
+				except (ProcessLookupError, PermissionError):
+					pass
+
+
+if __name__ == "__main__":
+	cli()
